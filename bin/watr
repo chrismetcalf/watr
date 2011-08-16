@@ -1,0 +1,115 @@
+#!/usr/bin/env ruby
+# Consumer for http://waterservices.usgs.gov/rest/IV-Service.html#URLFormat
+
+require 'rubygems'
+require 'json'
+require 'thread'
+require 'cgi'
+require 'progressbar'
+
+['socrata', 'watr', 'util'].each do |lib|
+  require File.join(File.dirname(__FILE__), "../lib/#{lib}")
+end
+
+CONFIG = YAML.load_file(ARGV[0])[ENV["RACK_ENV"] || "development"]
+
+socrata = Socrata.new({
+  :domain => CONFIG["domain"],
+  :username => CONFIG["username"],
+  :password => CONFIG["password"],
+  :app_token => CONFIG["app_token"]
+})
+
+victim = socrata.get("/views/#{CONFIG["dataset"]}.json")
+
+# Check to see if we've loaded data into this dataset before, so we have a start date
+start_time = victim["metadata"]["custom_fields"]["Dataset Maintenence"]["Last Updated"]
+if start_time.is_a? String
+  # Attempt to parse it
+  start_time = Time.new(start_time)
+end
+
+# Max out at one hour
+if (Time.now - start_time) > 360
+  start_time = Time.now - 360
+end
+
+# Allow overriding the time value on the command line
+if ARGV.count > 1
+  start_time = Time.parse(ARGV[1])
+  puts "Overriding start time to be: #{start_time}"
+else
+  puts "Picking up where we left off at #{start_time}"
+end
+
+# Get our flow results from the service
+now = Time.now
+stations = Watr.new.find_by_state(CONFIG["state"], :startDT => start_time.iso8601, :endDT => now.iso8601)
+
+# We'll stick all our readings in here and batch them later
+readings = Array.new
+
+
+# Iterate through all our stations
+stations["value"]["timeSeries"].each do |station|
+  # We'll reuse this station details object for each value
+  station_details = {
+    "Station ID" => station["name"],
+    "Name" => station["sourceInfo"]["siteName"],
+    "Site Code" => station["sourceInfo"]["siteCode"][0]["value"],
+    "Network" => station["sourceInfo"]["siteCode"][0]["network"],
+    "Agency" => station["sourceInfo"]["siteCode"][0]["agencyCode"],
+    "Geolocation" => {
+      "latitude" => station["sourceInfo"]["geoLocation"]["geogLocation"]["latitude"],
+      "longitude" => station["sourceInfo"]["geoLocation"]["geogLocation"]["longitude"]
+    }
+  }
+
+  # Each station appears to only provide one variable
+  variable = station["variable"]
+
+  # Skip this unless we're configured to use it
+  next unless CONFIG["variables"].include? variable["variableName"]
+
+  # Top level - sensors?
+  station["values"].collect{ |v| v["value"] }.compact.each do |sensor|
+    # Next level - readings
+    sensor.each do |reading|
+      next if reading["value"].to_f < 0
+
+      readings << {
+        "Value" => reading["value"].to_f,
+        "Timestamp" => reading["dateTime"].to_i,
+        "Measurement" => CGI.unescapeHTML(variable["variableName"]),
+        "Measurement Description" => variable["variableDescription"],
+        "Unit" => variable["unit"]["unitAbbreviation"]
+      }.merge(station_details)
+    end
+  end
+end
+
+# Batch out our row updates
+puts "Batching out #{readings.count} total readings..."
+progress = ProgressBar.new("Readings", readings.count)
+while readings.count > 0
+  socrata.batch do
+    readings.shift(CONFIG["batch_size"]).each do |reading|
+      socrata.post("/views/#{CONFIG["dataset"]}/rows.json", :body => reading.to_json)
+    end
+  end
+  progress.inc(CONFIG["batch_size"])
+end
+progress.finish
+
+# Store away our new timestamp
+update = {
+  "metadata" => victim["metadata"].deep_merge({
+    "custom_fields" => {
+      "Dataset Maintenence" => {
+        "Last Updated" => now.iso8601
+      }
+    }
+  })
+}
+socrata.put("/views/#{CONFIG["dataset"]}.json", :body => update.to_json)
+

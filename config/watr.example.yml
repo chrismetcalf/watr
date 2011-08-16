@@ -1,0 +1,11 @@
+development:
+  username:
+  password:
+  app_token:
+  domain:
+  dataset:
+  state:
+  batch_size: 20
+  variables:
+    - "Stream velocity, ft/s"
+    - "Streamflow, ft&#179;/s"
