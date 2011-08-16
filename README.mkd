@@ -1,2 +1,2 @@
-A simple consumer for the USGS instantaneous water levels service. Details available at: http://waterservices.usgs.gov/rest/IV-Service.html.
+A simple consumer for the USGS instantaneous water levels service that publishes entries to the Socrata Open Data Publisher API. Details available at: http://waterservices.usgs.gov/rest/IV-Service.html.
 
